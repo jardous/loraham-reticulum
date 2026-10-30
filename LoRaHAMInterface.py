@@ -12,6 +12,7 @@ import queue
 import secrets
 import threading
 import time
+from collections import deque
 
 import RNS
 from RNS.Interfaces.Interface import Interface
@@ -37,6 +38,36 @@ def airtime(size, bandwidth, sf, cr, preamble):
     symbols = 8 + max(0, math.ceil((8 * size - 4 * sf + 44) /
                                   (4 * (sf - 2 * ldro))) * cr)
     return (preamble + 4.25 + symbols) * symbol
+
+
+class AirtimeBudget:
+    """Rolling-hour airtime cap that permits protocol handshakes in bursts.
+
+    Entries are charged at packet completion. One worker owns the budget, so
+    admission and charging cannot race with another transmitter in this driver.
+    This is runtime accounting, not a persistent or certified regulatory meter.
+    """
+    def __init__(self, fraction, window=3600):
+        self.window = window
+        self.capacity = fraction * window
+        self.history = deque()
+
+    def ready_at(self, airtime, now):
+        if not math.isfinite(airtime) or not 0 < airtime <= self.capacity:
+            raise ValueError('Packet airtime exceeds the configured rolling-hour budget')
+        while self.history and self.history[0][0] + self.window <= now:
+            self.history.popleft()
+        used = sum(duration for _, duration in self.history)
+        if used + airtime <= self.capacity + 1e-9:
+            return now
+        for completed, duration in self.history:
+            used -= duration
+            if used + airtime <= self.capacity + 1e-9:
+                return completed + self.window
+        return now
+
+    def charge(self, airtime, completed):
+        self.history.append((completed, airtime))
 
 
 class RNodeFraming:
@@ -298,6 +329,7 @@ class LoRaHAMInterface(Interface):
         self.duty_cycle = float(config.get('duty_cycle', 1)) / 100
         if not 0 < self.duty_cycle <= .01:
             raise ValueError('Duty cycle must be >0 and <=1 percent')
+        self.airtime_budget = AirtimeBudget(self.duty_cycle)
         self.bitrate = sf * bandwidth / 2 ** sf * 4 / cr
         self.framing = RNodeFraming()
         self.tx_queue = queue.Queue(maxsize=32)
@@ -343,19 +375,23 @@ class LoRaHAMInterface(Interface):
                     except queue.Empty:
                         pass
                 if pending is not None and now >= next_tx:
-                    if self.radio.busy():
+                    data, frames, index = pending
+                    total_airtime = sum(self.radio.time_on_air(len(f)) for f in frames)
+                    # Check the whole packet before its first fragment; never
+                    # insert a budget wait between a split pair's fragments.
+                    allowed_at = self.airtime_budget.ready_at(total_airtime, now) if index == 0 else now
+                    if allowed_at > now:
+                        next_tx = allowed_at
+                    elif self.radio.busy():
                         next_tx = now + .05 + secrets.randbelow(151) / 1000
                     else:
-                        data, frames, index = pending
                         frame = frames[index]
                         self.radio.transmit(frame)
-                        # Duty limit applies per whole Reticulum packet. A split
-                        # pair must remain contiguous, as on the RNode firmware.
                         index += 1
                         if index == len(frames):
                             self.txb += len(data)
-                            total_airtime = sum(self.radio.time_on_air(len(f)) for f in frames)
-                            next_tx = time.monotonic() + total_airtime * (1 / self.duty_cycle - 1)
+                            self.airtime_budget.charge(total_airtime, time.monotonic())
+                            next_tx = time.monotonic()
                             pending = None
                         else:
                             pending[2] = index

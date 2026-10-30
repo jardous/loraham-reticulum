@@ -25,7 +25,9 @@ setup, not a claim about every board revision or radio configuration.
 | 200-byte USB → Pi → USB echo | Exact byte and SHA-256 match |
 | 450-byte USB → Pi → USB echo | Exact match; two LoRa frames each direction |
 | Duplex frame totals on Pi | Four RX, four TX, zero CRC errors |
-| Actual Reticulum announces/links/LXMF | **Not yet tested over air** |
+| Reticulum path discovery and authenticated link | Passed with radio-only profiles |
+| Authenticated `rnx hostname` | Returned `roofnode`, exit status 0 |
+| LXMF messages | **Not yet tested over air** |
 
 Duplex signal readings:
 
@@ -54,3 +56,35 @@ the AGC-controlled gain bits as a failed write.
 
 The indicator LED is controlled in software. Lack of blinking in a direct SPI
 probe that never drives GPIO19 is not evidence of a defective radio.
+
+## Reticulum command integration and airtime regression
+
+The initial interface imposed a 99×-airtime quiet interval after each packet.
+With a freshly started radio-only PC profile, the Pi received a path request,
+but its response remained queued behind the startup announce's quiet interval;
+`rnx` exited with `Path not found`. Longer tests also stalled. A 1% short-term
+USB RNode limit compounded handshake delays.
+
+The fixed interface admits short bursts against a 1% rolling-hour airtime budget
+instead. The USB peer used 33% short-term / 1% long-term limits. A fresh test
+with **no AutoInterface, TCP or Internet interfaces on either side** passed:
+
+- PC requested the Pi's `rnx.execute` destination and obtained its path.
+- An authenticated encrypted link was established in approximately 0.95 seconds.
+- The listener identified and authorised the PC's existing identity.
+- `hostname` executed on the Pi and returned `roofnode` with exit status 0.
+- Request/response transfer: 85 bytes, approximately 2.02 seconds after command
+  execution (application-reported measurement).
+- Pi interface counters at completion: 661 RX bytes, 583 TX bytes.
+
+A second radio-only test loaded the **installed** fixed interface and drove
+`rnx -x` with `hostname` followed by `exit`; it also returned `roofnode` and
+exited successfully. Both tests used the existing authenticated identities.
+
+The unit suite now has 30 passing tests, including handshake burst admission,
+rolling-window exhaustion/release and waiting without transmitting when the
+airtime budget is exhausted.
+
+Temporary listener/client processes exited after testing; production identities
+and authentication were preserved. The rolling budget is runtime-only and does
+not survive restart. LXMF messaging and sustained-load testing remain pending.

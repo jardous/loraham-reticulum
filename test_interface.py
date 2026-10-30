@@ -52,6 +52,30 @@ class FramingTests(unittest.TestCase):
             self.assertIsNone(d.decode(frame))
 
 
+class AirtimeBudgetTests(unittest.TestCase):
+    def test_handshake_burst_has_no_per_packet_pause(self):
+        budget = module.AirtimeBudget(.01)
+        for when in range(10):
+            self.assertEqual(budget.ready_at(.5, when), when)
+            budget.charge(.5, when + .5)
+
+    def test_exhaustion_and_rolling_release(self):
+        budget = module.AirtimeBudget(.01)
+        budget.charge(20, 10)
+        budget.charge(15, 20)
+        self.assertEqual(budget.ready_at(1, 30), 30)
+        self.assertEqual(budget.ready_at(2, 30), 3610)
+        self.assertEqual(budget.ready_at(22, 30), 3620)
+        self.assertEqual(budget.ready_at(2, 3610), 3610)
+        self.assertEqual(len(budget.history), 1)
+
+    def test_oversized_airtime_rejected(self):
+        budget = module.AirtimeBudget(.001)
+        for airtime in [0, -1, 4, float('nan'), float('inf')]:
+            with self.subTest(airtime=airtime), self.assertRaises(ValueError):
+                budget.ready_at(airtime, 0)
+
+
 class ParameterTests(unittest.TestCase):
     def test_reject_433_and_sf5(self):
         for args in [(433000000, 125000, 8, 5, 2),
@@ -263,6 +287,33 @@ class InterfaceTests(unittest.TestCase):
             i._run()
         self.assertFalse(i.online)
         i.radio.close.assert_called_once()
+
+    def test_worker_allows_handshake_packets_in_burst(self):
+        i = self.make_interface(tx_enabled='yes')
+        i.OUT = True
+        for _ in range(3):
+            i.process_outgoing(b'handshake')
+        i.radio.poll.return_value = None
+        i.radio.busy.return_value = False
+        i.radio.time_on_air.return_value = .5
+        i.stop.is_set = Mock(side_effect=[False] * 12 + [True])
+        with patch.object(module.time, 'monotonic', side_effect=range(100)):
+            i._run()
+        self.assertEqual(i.radio.transmit.call_count, 3)
+        self.assertEqual(len(i.airtime_budget.history), 3)
+
+    def test_worker_waits_for_budget_without_transmitting(self):
+        i = self.make_interface(tx_enabled='yes')
+        i.OUT = True
+        i.process_outgoing(b'handshake')
+        i.airtime_budget.charge(36, 0)
+        i.radio.poll.return_value = None
+        i.radio.busy.return_value = False
+        i.radio.time_on_air.return_value = .5
+        i.stop.is_set = Mock(side_effect=[False] * 12 + [True])
+        with patch.object(module.time, 'monotonic', side_effect=range(100)):
+            i._run()
+        i.radio.transmit.assert_not_called()
 
     def test_detach(self):
         i = self.make_interface()

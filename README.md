@@ -8,8 +8,9 @@ is required. It contains its own SPI driver and does not modify other software.
 
 **Status: experimental.** Hardware setup, Reticulum plugin loading, and raw
 32-/200-/450-byte packets in both directions have passed on a Raspberry Pi 3.
-Full Reticulum announce, link and LXMF message exchange still needs an over-air
-integration test. See [validation.md](validation.md) for the exact test scope.
+Authenticated `rnx hostname` execution also passed over LoRa-only profiles,
+including path discovery and link establishment. LXMF messaging has not yet
+been tested. See [validation.md](validation.md) for the exact test scope.
 
 ## Hardware scope and safety
 
@@ -145,7 +146,7 @@ driver-level guard in addition to Reticulum's `outgoing` option.
 | `spreadingfactor` | `8` | SF7–SF12 |
 | `codingrate` | `5` | 5–8, representing 4/5–4/8 |
 | `txpower` | `2` | 2–17 dBm through PA_BOOST; no external amplifier |
-| `duty_cycle` | `1` | >0 to 1 percent |
+| `duty_cycle` | `1` | >0 to 1 percent over a rolling hour; permits handshake bursts |
 | `tx_enabled` | `no` | Explicit extra TX permission |
 
 Peers must match frequency, bandwidth, SF and coding rate. The driver uses
@@ -190,10 +191,11 @@ settings manually—the script cannot guarantee restoration without access.
 `--output` refuses to overwrite an existing file. Do not run the echo helper as
 a permanent daemon; it is only a bench diagnostic.
 
-## Reticulum protocol integration check (still pending)
+## Reticulum protocol integration check
 
 Raw echo success and an online interface are necessary but do not demonstrate
-Reticulum routing or message delivery. For an actual protocol test:
+Reticulum routing or message delivery. Authenticated `rnx hostname` has now
+passed on radio-only profiles. To repeat a protocol test:
 
 1. Configure a peer's regular `RNodeInterface` for the same radio parameters.
 2. Enable `outgoing` and `tx_enabled` on the Pi and start both RNS instances.
@@ -203,6 +205,39 @@ Reticulum routing or message delivery. For an actual protocol test:
    aspect filter; verify a returned delivery proof over the radio, with no LAN
    or Internet interface providing an alternate path.
 5. Test the opposite direction, then LXMF delivery with compatible clients.
+
+### Remote commands with `rnx`
+
+On the Pi, authorise only the PC's **identity hash** (not its destination hash):
+
+```sh
+rnx --listen -a PC_IDENTITY_HASH
+```
+
+On the PC, target the Pi's **listener destination hash**:
+
+```sh
+rnx -w 60 PI_LISTENER_DESTINATION_HASH hostname
+rnx -x -w 60 PI_LISTENER_DESTINATION_HASH
+```
+
+The second command starts `rnx`'s command prompt. Sending the command `sh` does
+not open a persistent SSH-style terminal or allocate a PTY. Each command is an
+independent execution; do not use `--noauth` to work around connectivity issues.
+
+For the PC's regular `RNodeInterface`, allow handshake bursts while preserving
+the long-term limit:
+
+```ini
+airtime_limit_short = 33
+airtime_limit_long = 1
+```
+
+Setting the short-term limit to 1% can hold control packets too long. Similarly,
+the original custom interface's 99×-airtime pause after every packet delayed
+path replies and link proofs. The rolling-hour budget replaces that pause:
+at 1%, up to 36 seconds of airtime can be used per rolling hour, allowing small
+authenticated exchanges to finish without artificial inter-packet delays.
 
 This interface supplies a radio link, not an LXMF mailbox or chat application.
 Only enable `enable_transport = yes` if you intentionally want this Pi to route
@@ -217,10 +252,13 @@ Reticulum traffic between interfaces.
   fragments. That format has no source or fragment index: lost/interleaved
   fragments or 4-bit sequence collisions can corrupt a reassembly. Upper-layer
   Reticulum processing remains responsible for validating packets.
-- Split fragments are sent together, then their total airtime determines the
-  enforced quiet interval (at most 1% duty cycle). This is not a rolling-hour
-  regulatory meter, a full RNode CSMA implementation or regulatory certification.
-  Restarting the process does not preserve an airtime budget.
+- Before a packet's first fragment, its total airtime must fit in the remaining
+  rolling-hour budget (at most 1%, or 36 seconds/hour). Split fragments are sent
+  together and charged at completion. Exhaustion defers the next packet until
+  sufficient airtime expires from the window, rather than imposing a pause
+  after every packet. This is not a certified regulatory meter or full RNode
+  CSMA implementation. Restarting the process does not preserve the budget;
+  do not use restarts to evade airtime limits.
 - Hardware faults take the interface offline and close its resources. There is
   no automatic reconnect; fix the fault and restart the RNS instance.
 - Pins and gpiochip0 are specific to the tested Pi 3 / LoRaHAM Pi mapping.
