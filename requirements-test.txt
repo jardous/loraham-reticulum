@@ -1,0 +1,2 @@
+# Test dependencies only: fake GPIO/SPI need no Pi-specific packages on CI.
+rns>=1.5.7,<2

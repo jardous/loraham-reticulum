@@ -1,0 +1,6 @@
+# Runtime dependencies. RNS provides rnsd, rnstatus and rnprobe.
+rns>=1.5.7,<2
+# Prefer Debian/Raspberry Pi OS python3-spidev and python3-lgpio packages
+# with a --system-site-packages virtual environment (see README.md).
+spidev>=3.6,<4
+lgpio>=0.2.2.0,<1

@@ -1,0 +1,21 @@
+# Receive-only defaults for the standalone LoRaHAM interface.
+[reticulum]
+  enable_transport = no
+  share_instance = yes
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[LoRaHAM 868]]
+    type = LoRaHAMInterface
+    enabled = yes
+    # Both switches must be enabled deliberately to permit any RF transmission.
+    outgoing = no
+    tx_enabled = no
+    frequency = 867500000
+    bandwidth = 125000
+    spreadingfactor = 8
+    codingrate = 5
+    txpower = 2
+    duty_cycle = 1
